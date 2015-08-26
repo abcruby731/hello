@@ -13,7 +13,9 @@
             ;; [ring.middleware.defaults :refer [wrap-defaults site-defaults]]
             [compojure.route :as route]
             [compojure.core :as core]
-            [taoensso.carmine :as car :refer (wcar)]))
+            [taoensso.carmine :as car :refer (wcar)]
+            [schema.core :as s
+             :include-macros true]))
 
 (def server1-conn {:pool {} :spec {}})
 (defmacro wcar* [& body] `(car/wcar server1-conn ~@body))
@@ -25,6 +27,15 @@
                 :subname (str "//" db-host ":" db-port "/" db-name)
                 :user "aaa"
                 :password "123"}))
+
+(def Positive (s/pred pos?))
+
+(def Data
+  "A schema for a nested data type"
+  {(s/required-key "id") s/Int
+   (s/required-key "name") s/Str
+   (s/required-key "author") s/Str
+   (s/required-key "price") Positive})
 
 
 (defn redis-works [id]
@@ -51,41 +62,80 @@
     (jdbc/insert! conn :works body)))
 
 (core/defroutes my-routes
-  (core/GET "/works/:id" [id]
-    {:status 200
-     :headers {"Content-Type" "application/json"}
-     :body (if (= (wcar* (car/exists (redis-works id))) 0)
-             (do (wcar* (car/set (redis-works id) (first (query-from-db id)))
-                        (car/expire (redis-works id) 3600))
-                 (generate-string (wcar* (car/get (redis-works id)))))
-             (generate-string (wcar* (car/get (redis-works id)))))
-     })
+  (core/GET "/works/:id" [id :as {uri :uri}]
+    (if (nil? (s/check s/Int (Integer/parseInt (str (last uri)))))
+      (let [require-work (redis-works id)]
+        (if (zero? (wcar* (car/exists require-work)))
+          (let [work-map (first (query-from-db id))]
+            (if (nil? work-map)
+              {:status 404
+               :body "404 not found!"}
+              (do
+                (wcar* (apply car/hmset require-work (reduce into work-map))
+                       (car/expire require-work 7200))
+                {:status 200
+                 :headers {"Content-Type" "application/json"}
+                 :body (-> (wcar* (car/hgetall require-work))
+                           generate-string)})))
+          {:status 200
+           :headers {"Content-Type" "application/json"}
+           :body (-> (wcar* (car/hgetall require-work))
+                     generate-string)}))
+      {:status 400
+       :body "400 bad request!"}
+      )
+    )
   (core/DELETE "/works/:id" [id]
     {:status 200
      :headers {"Content-Type" "text/plain"}
      :body (do (wcar* (car/del (redis-works id)))
                (delete-from-db id)
-               (str "works:" (Integer/parseInt id) " deleted!"))
+               "ok")
      })
-  (core/PUT "/works/:id" [id :as {body :body}]
-    {:status 200
-     :headers {"Content-Type" "text/plain"}
-     :body (let [body (parse-string (slurp body))]
-             (do
-               (update-db id body)
-               (wcar* (car/set (redis-works id) body)
-                      (car/expire (redis-works id) 3600))
-               (str (redis-works id) " updated!")))
-     })
+  (core/PATCH "/works/:id" [id :as {body :body}]
+              (let [body (parse-string (slurp body))]
+                (prn id)
+                (if (nil? (s/check Data body))
+                  (let [require-work (redis-works id)
+                        work-map (first (query-from-db id))]
+                    (if (nil? work-map)
+                      {:status 404
+                       :body "404 not found"}
+                      (do
+                        (update-db id body)
+                        (wcar* (apply car/hmset require-work (reduce into body))
+                               (car/expire require-work 7200))
+                        {:status 200
+                         :body "ok"})))
+                  {:status 400
+                   :body "400 bad request"})))
   (core/POST "/works" [:as {body :body}]
-    {:status 200
-     :headers {"Content-Type" "text/plain"}
-     :body (let [body (parse-string (slurp body))]
-             (do (insert-db body)
-                 (wcar* (car/set (redis-works (str (body "id"))) body)
-                        (car/expire (redis-works (str (body "id"))) 3600))
-                 (str "make done!")))
-     }))
+
+    (let [body (parse-string (slurp body))
+          require-work (redis-works (str (body "id")))
+          ]
+      (prn body)
+      (if (nil? (s/check Data body))
+        (do
+          (insert-db body)
+          (prn (wcar* (apply car/hmset require-work (reduce into body))
+                      (car/expire require-work 7200)))
+          {:status 200
+           :headers {"Content-Type" "application/json"}
+           :body (generate-string body)})
+        {:status 400
+         :body "400 bad request"})
+      )
+    ;; {:status 200
+    ;;  :headers {"Content-Type" "text/plain"}
+    ;;  :body (let [body (parse-string (slurp body))]
+    ;;          (do (insert-db body)
+    ;;              (wcar* (car/set (redis-works (str (body "id"))) body)
+    ;;                     (car/expire (redis-works (str (body "id"))) 3600))
+    ;;              (str "make done!")))
+    ;;  }
+    )
+  (route/not-found "404 not found"))
 
 ;; (core/defroutes my-routes
 ;;   (core/context "" [id :as {uri :uri}]

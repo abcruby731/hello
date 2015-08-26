@@ -12,7 +12,8 @@
                  [cheshire "5.5.0"]
                  [compojure "1.4.0"]
                  [ring/ring-defaults "0.1.5"]
-                 [com.taoensso/carmine "2.11.1"]]
+                 [com.taoensso/carmine "2.11.1"]
+                 [prismatic/schema "0.4.4"]]
   ;; :plugins [[lein-ring "0.8.11"]]
   :ring {:handler hello.core}
   :main hello.core)
